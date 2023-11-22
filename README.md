@@ -3,7 +3,7 @@
 `crux-bitcode` is a CRUX Linux Docker image to make generating LLVM bitcode from (some) open-source software easy by using CRUX's ports system and GLLVM.
 `build-bitcode.sh` can build software in the official ports tree (with some caveats) into bitcode.
 
-LLVM/Clang version: 12.0.0.
+LLVM/Clang version: 15.0.7.
 
 ## Requirements
 Docker.
