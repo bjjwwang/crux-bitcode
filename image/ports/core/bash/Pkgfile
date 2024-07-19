@@ -6,7 +6,7 @@
 name=bash
 version=5.0.18
 release=1
-source=(http://ftpmirror.gnu.org/gnu/$name/$name-${version:0:3}.tar.gz \
+source=(http://ftp.gnu.org/gnu/$name/$name-${version:0:3}.tar.gz \
         $name-$version.patch.gz profile)
 
 build() {

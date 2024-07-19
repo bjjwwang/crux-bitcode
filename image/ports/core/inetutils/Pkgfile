@@ -6,7 +6,7 @@
 name=inetutils
 version=1.9.4
 release=3
-source=(http://ftpmirror.gnu.org/gnu/inetutils/inetutils-$version.tar.gz \
+source=(http://ftp.gnu.org/gnu/inetutils/inetutils-$version.tar.gz \
         inetd.conf inetd)
 
 build() {
