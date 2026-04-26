@@ -8,7 +8,7 @@ usage() {
 }
 
 sources=0
-version=16.0.6
+version=22.1.0
 while getopts ':shv:' opt; do
   case $opt in
     s)
