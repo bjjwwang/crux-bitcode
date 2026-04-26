@@ -1,0 +1,189 @@
+FROM mbarbar/crux:3.5
+
+# Set this to 21.1.0 or 22.1.0 (or any other llvmorg- tag with a monorepo
+# tarball published on github.com/llvm/llvm-project/releases).
+ARG LLVM_VERSION=22.1.0
+ENV LLVM_VERSION=${LLVM_VERSION}
+
+# Newer cmake is needed because LLVM >= 20 requires cmake >= 3.20, and CRUX
+# 3.5 ships 3.19. Bump if you bump LLVM further.
+ARG CMAKE_VERSION=3.31.5
+ENV CMAKE_VERSION=${CMAKE_VERSION}
+
+ENV HOME="/root"
+
+# Copy our ports snapshot over.
+COPY ports/core /usr/ports/core
+
+# Tell prt-get about contrib and bc.
+RUN echo prtdir /usr/ports/contrib/ >> /etc/prt-get.conf
+RUN echo prtdir /usr/ports/bc/ >> /etc/prt-get.conf
+
+# Modify default pkgmk.conf
+RUN sed -i 's/# export JOBS/export JOBS/' /etc/pkgmk.conf
+RUN sed -i 's/# export MAKEFLAGS/export MAKEFLAGS/' /etc/pkgmk.conf
+
+# Handle some special cases before a full system update.
+COPY pre-sysup.sh /bin
+RUN pre-sysup.sh
+
+# Update core. Tolerant of rotated upstream source URLs in the snapshotted
+# ports: any sysup failure is logged but doesn't abort the image. Anything
+# we genuinely need (ninja, python3, libxml2, gcc, cmake, …) will fail loudly
+# in the explicit depinst steps below.
+RUN prt-get -is -if sysup \
+ || { rc=$?; echo "WARN: prt-get sysup exit=$rc (likely rotated upstream URLs); continuing" >&2; }
+
+COPY ports/opt /usr/ports/opt
+
+# ---------------------------------------------------------------------------
+# Build LLVM/Clang/compiler-rt at $LLVM_VERSION from source.
+# Replaces the legacy `prt-get depinst llvm/compiler-rt/clang` lines, which
+# pinned the in-image toolchain to whatever the CRUX ports' Pkgfile said.
+# ---------------------------------------------------------------------------
+
+# Build deps from CRUX ports (cmake from ports is too old; installed below).
+# `depinst` exits 255 when the target package is already installed (e.g.
+# python3 gets pulled in transitively by ninja), so each line is idempotent.
+RUN prt-get isinst ninja   || prt-get -is -if --install-scripts depinst ninja
+RUN prt-get isinst python3 || prt-get -is -if --install-scripts depinst python3
+RUN prt-get isinst libxml2 || prt-get -is -if --install-scripts depinst libxml2
+
+# Drop in a recent cmake (Kitware's static linux build) — auto-pick arch.
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  cmake_arch=x86_64 ;; \
+      aarch64) cmake_arch=aarch64 ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fL -o /tmp/cmake.tar.gz \
+      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-${cmake_arch}.tar.gz"; \
+    mkdir -p /opt /usr/local/bin; \
+    tar -C /opt -xzf /tmp/cmake.tar.gz; \
+    ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${cmake_arch}/bin/cmake" /usr/local/bin/cmake; \
+    ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${cmake_arch}/bin/ctest" /usr/local/bin/ctest; \
+    rm /tmp/cmake.tar.gz; \
+    cmake --version
+
+# Fetch the LLVM monorepo source and build clang + compiler-rt into /usr/local.
+# Tuned for build-host RAM: link jobs capped at 2 (ld can use 8+ GB each).
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  llvm_targets="X86;AArch64;BPF" ;; \
+      aarch64) llvm_targets="AArch64;X86;BPF" ;; \
+    esac; \
+    curl -fL -o /tmp/llvm.tar.xz \
+      "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-project-${LLVM_VERSION}.src.tar.xz"; \
+    mkdir -p /tmp/llvm-src; \
+    tar -C /tmp/llvm-src --strip-components=1 -xf /tmp/llvm.tar.xz; \
+    rm /tmp/llvm.tar.xz; \
+    cd /tmp/llvm-src; \
+    cmake -S llvm -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DLLVM_ENABLE_PROJECTS="clang" \
+      -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+      -DLLVM_ENABLE_RTTI=ON \
+      -DLLVM_ENABLE_FFI=OFF \
+      -DLLVM_INCLUDE_TESTS=OFF \
+      -DLLVM_INCLUDE_EXAMPLES=OFF \
+      -DLLVM_INCLUDE_BENCHMARKS=OFF \
+      -DLLVM_TARGETS_TO_BUILD="${llvm_targets}" \
+      -DLLVM_BUILD_LLVM_DYLIB=ON \
+      -DLLVM_LINK_LLVM_DYLIB=ON \
+      -DLLVM_PARALLEL_LINK_JOBS=2 \
+      -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+      -DCOMPILER_RT_BUILD_XRAY=OFF \
+      -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+      -DCOMPILER_RT_BUILD_PROFILE=OFF \
+      -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+      -DCOMPILER_RT_BUILD_ORC=OFF; \
+    cmake --build build --target install; \
+    cd /; \
+    rm -rf /tmp/llvm-src
+
+# Stub CRUX packages so transitive `Depends on: llvm` (mesa3d -> qt5, etc.)
+# is satisfied without re-installing the old in-port LLVM.
+RUN set -eux; \
+    for p in llvm clang compiler-rt; do \
+      mkdir -p /tmp/stub-$p; \
+      cd /tmp/stub-$p; \
+      printf '# Description: Stub for system-installed %s.\n# URL: -\n# Maintainer: -\n\nname=%s\nversion=%s\nrelease=1\nsource=()\n\nbuild() {\n  install -d "$PKG/usr/share/llvm-stub"\n  : > "$PKG/usr/share/llvm-stub/.${name}-installed"\n}\n' "$p" "$p" "${LLVM_VERSION}" > Pkgfile; \
+      pkgmk -d -f; \
+      pkgadd -f "$p#${LLVM_VERSION}-1.pkg.tar.gz"; \
+      cd /; \
+      rm -rf /tmp/stub-$p; \
+    done
+
+# ---------------------------------------------------------------------------
+
+# Install GLLVM. No need for a port; this is a throwaway container.
+COPY ports/contrib /usr/ports/contrib
+RUN prt-get isinst git || prt-get depinst -is --install-scripts git
+
+# CRUX `go` port bootstraps from go1.4.3.linux-amd64.tar.gz on Google Cloud
+# Storage, which Google has since removed (HTTP 403). Drop in a recent
+# upstream golang binary release instead — auto-pick arch.
+ARG GO_VERSION=1.23.4
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  go_arch=amd64 ;; \
+      aarch64) go_arch=arm64 ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fL -o /tmp/go.tar.gz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz; \
+    /usr/local/go/bin/go version
+
+ENV PATH="/usr/local/go/bin:${HOME}/go/bin:${PATH}"
+
+RUN go install github.com/SRI-CSL/gllvm/cmd/...@latest
+
+# (qt5 was pre-installed in the legacy 16.0.6 image as a "large common
+# dependency". The CRUX qt5 port has many transitive deps with rotated
+# upstream source URLs in this snapshot; we skip it here to keep the LLVM
+# 21/22 build deterministic. Users who need qt5 can run
+# `prt-get depinst qt5` inside the container and patch any 404s by hand.)
+
+# Install zip.
+RUN prt-get isinst zip || prt-get -is --install-scripts depinst zip
+
+# Install Lua.
+RUN prt-get isinst lua53 || prt-get depinst -is -if --install-scripts lua53
+
+# Actually use GLLVM. Point it at our source-built clang.
+ENV LLVM_COMPILER_PATH=/usr/local/bin
+ENV CC=gclang
+ENV CXX=gclang++
+
+# Move gclang to a lower precedence in PATH and overwrite all C compilers,
+# including gclang, with cc.lua which will solve some of our CFLAGS woes
+# and hardcoded gcc.
+COPY shell.lua /usr/share/lua/5.3/shell.lua
+
+RUN mv "$HOME/go/bin/gclang" /bin/gclang
+COPY cc.lua /usr/bin/gclang
+COPY cc.lua /usr/bin/gcc
+COPY cc.lua /usr/bin/cc
+
+# Repeat for C++ compilers.
+RUN mv "$HOME/go/bin/gclang++" /bin/gclang++
+COPY cxx.lua /usr/bin/gclang++
+COPY cxx.lua /usr/bin/g++
+COPY cxx.lua /usr/bin/cxx
+
+ENV PKGS_FILE "/etc/pkgs.txt"
+ENV BC_DIR "$HOME/bitcode"
+ENV SRC_DIR "$HOME/source"
+
+# Our script which builds bitcode.
+COPY build-bitcode.lua "/usr/bin/build-bitcode"
+# Our script which counts LOC for built bitcode.
+COPY loc.awk "/usr/bin/loc"
+
+WORKDIR "$HOME"

@@ -1,15 +1,21 @@
 #!/bin/sh
 
 usage() {
-  echo "usage: $0 [-s]"
-  echo "  -s  extract source code"
+  echo "usage: $0 [-s] [-v VERSION]"
+  echo "  -s          extract source code"
+  echo "  -v VERSION  LLVM version tag of the image to use"
+  echo "              (default: 16.0.6; supported: 16.0.6, 21.1.0, 22.1.0)"
 }
 
 sources=0
-while getopts ':sh' opt; do
+version=16.0.6
+while getopts ':shv:' opt; do
   case $opt in
     s)
       sources=1
+      ;;
+    v)
+      version="$OPTARG"
       ;;
     h)
       usage
@@ -22,8 +28,10 @@ while getopts ':sh' opt; do
   esac
 done
 
+image="wangjiaweiuts/crux-bitcode:${version}"
+
 # Spin up a container.
-id=`docker run --rm --detach -it wangjiaweiuts/crux-bitcode:16.0.6 bash`
+id=`docker run --rm --detach -it "$image" bash`
 # Short ID, for more wieldy filenames.
 sid=`echo $id | head -c 10`
 

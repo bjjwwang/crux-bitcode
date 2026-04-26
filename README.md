@@ -3,7 +3,7 @@
 `crux-bitcode` is a CRUX Linux Docker image to make generating LLVM bitcode from (some) open-source software easy by using CRUX's ports system and GLLVM.
 `build-bitcode.sh` can build software in the official ports tree (with some caveats) into bitcode.
 
-LLVM/Clang version: 16.0.6.
+LLVM/Clang versions: 16.0.6 (default), 21.1.0, 22.1.0.
 
 ## Requirements
 Docker.
@@ -12,8 +12,27 @@ The first run may be slow as the (large) image is downloaded.
 ## Usage
 1. Create a list of desired ports in a file `pkgs.txt` (modify included file).
    (The full list of possibilities can be seen by running `ls ports/*/`.)
-2. Run `./build-bitcode.sh`.
+2. Run `./build-bitcode.sh` (defaults to LLVM 16.0.6).
+   - Pick another version with `-v`: `./build-bitcode.sh -v 21.1.0` or `-v 22.1.0`.
 3. unzip the generated `bitcode-XYZ.zip`.
+
+## Building the LLVM 21.1.0 / 22.1.0 images
+The `21.1.0` and `22.1.0` images source-build clang+compiler-rt inside CRUX 3.5
+using the upstream `llvm-project-<ver>.src.tar.xz` monorepo tarball, then
+register stub CRUX packages so transitive `Depends on: llvm` (e.g. mesa3d → qt5)
+is satisfied without dragging in the old in-port LLVM. Build them locally with:
+
+```
+cd image
+docker build -f Dockerfile.src --build-arg LLVM_VERSION=22.1.0 \
+  -t wangjiaweiuts/crux-bitcode:22.1.0 .
+docker build -f Dockerfile.src --build-arg LLVM_VERSION=21.1.0 \
+  -t wangjiaweiuts/crux-bitcode:21.1.0 .
+```
+
+The build is heavy (LLVM compile takes ~1–2h on a desktop, link parallelism
+capped at 2 to keep RAM under ~16 GB). Other versions can be built the same
+way as long as upstream publishes a matching `llvm-project-<ver>.src.tar.xz`.
 
 An `info.txt` file is provided alongside the bitcode files containing (an estimate of) the lines of C/C++ code used to generate each bitcode file.
 This is calculated by counting the lines of code in the files mentioned in the debug information.

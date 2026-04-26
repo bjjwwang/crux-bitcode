@@ -5,7 +5,8 @@
 name=expat
 version=2.2.10
 release=1
-source=(http://download.sourceforge.net/$name/$name-$version.tar.lz)
+_tag=R_${version//./_}
+source=(https://github.com/libexpat/libexpat/releases/download/$_tag/$name-$version.tar.xz)
 
 build() { 
     cd $name-$version
